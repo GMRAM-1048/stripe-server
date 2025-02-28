@@ -23,8 +23,19 @@ app.get('/payment-methods/:customerId', async (req, res) => {
   try {
     const { customerId } = req.params;
     
+    console.log(`Récupération des méthodes de paiement pour le customer: ${customerId}`);
+    
     if (!customerId) {
       return res.status(400).json({ error: 'ID client requis' });
+    }
+
+    // Vérifier d'abord que le customer existe
+    try {
+      await stripe.customers.retrieve(customerId);
+    } catch (error) {
+      console.error(`Customer non trouvé: ${customerId}`, error);
+      // Si le customer n'existe pas, on renvoie un tableau vide plutôt qu'une erreur
+      return res.json({ data: [] });
     }
     
     // Récupérer les méthodes de paiement enregistrées
@@ -33,10 +44,13 @@ app.get('/payment-methods/:customerId', async (req, res) => {
       type: 'card'
     });
     
+    console.log(`${paymentMethods.data.length} méthodes de paiement trouvées`);
+    
     res.json(paymentMethods.data);
   } catch (error) {
     console.error('Erreur:', error);
-    res.status(500).json({ error: error.message });
+    // En cas d'erreur, on renvoie un tableau vide avec un message
+    res.json({ data: [], error: error.message });
   }
 });
 
@@ -109,7 +123,7 @@ app.post('/create-payment-intent', async (req, res) => {
     console.log('Requête reçue:', req.body);
     
     // Extraire les données de la requête
-    const { amount, email = 'client@example.com' } = req.body;
+    const { amount, email = 'client@example.com', payment_method = null } = req.body;
     
     if (!amount || amount <= 0) {
       return res.status(400).json({ error: 'Montant invalide. Veuillez fournir un montant positif.' });
@@ -117,11 +131,41 @@ app.post('/create-payment-intent', async (req, res) => {
     
     console.log(`Création d'un PaymentIntent: ${amount} centimes pour ${email}`);
     
-    // Créer un customer ou utiliser un existant
-    const customer = await stripe.customers.create({
-      email: email
-    });
-    console.log(`Customer créé avec ID: ${customer.id}`);
+    // Créer ou réutiliser un customer
+    let customer;
+
+    // Si un customerId est fourni, essayer de l'utiliser d'abord
+    if (customerId) {
+      try {
+        customer = await stripe.customers.retrieve(customerId);
+        console.log(`Customer existant trouvé: ${customer.id}`);
+      } catch (e) {
+        console.log(`Customer ID invalide ou expiré, création d'un nouveau customer`);
+        customer = await stripe.customers.create({ email });
+        console.log(`Nouveau customer créé: ${customer.id}`);
+      }
+    } 
+    // Si une méthode de paiement est fournie, trouver le customer associé
+    else if (payment_method) {
+      try {
+        const paymentMethod = await stripe.paymentMethods.retrieve(payment_method);
+        if (paymentMethod.customer) {
+          customer = { id: paymentMethod.customer };
+          console.log(`Customer trouvé via payment method: ${customer.id}`);
+        } else {
+          customer = await stripe.customers.create({ email });
+          console.log(`Nouveau customer créé pour payment method: ${customer.id}`);
+        }
+      } catch (e) {
+        customer = await stripe.customers.create({ email });
+        console.log(`Erreur avec payment method, nouveau customer créé: ${customer.id}`);
+      }
+    } 
+    // Sinon créer un nouveau customer
+    else {
+      customer = await stripe.customers.create({ email });
+      console.log(`Nouveau customer créé: ${customer.id}`);
+    }
 
     // Créer une clé éphémère pour ce customer
     const ephemeralKey = await stripe.ephemeralKeys.create(
@@ -130,15 +174,27 @@ app.post('/create-payment-intent', async (req, res) => {
     );
     console.log('Clé éphémère créée');
 
-    // Créer un payment intent
-    const paymentIntent = await stripe.paymentIntents.create({
+    // Options de base pour le PaymentIntent
+    const paymentIntentOptions = {
       amount: amount,
       currency: 'mad', // MAD pour Dirham marocain
       customer: customer.id,
+      setup_future_usage: 'off_session', // Important: permet de sauvegarder la carte
       automatic_payment_methods: {
-        enabled: true,
+        enabled: !payment_method, // Désactiver si on utilise une méthode spécifique
       },
-    });
+    };
+
+    // Si une méthode de paiement est fournie, l'utiliser
+    if (payment_method) {
+      paymentIntentOptions.payment_method = payment_method;
+      // Note: on ne met pas off_session à true pour éviter des problèmes d'authentification 3DS
+      //paymentIntentOptions.off_session = true;
+      //paymentIntentOptions.confirm = true;
+    }
+    
+    // Créer le PaymentIntent
+    const paymentIntent = await stripe.paymentIntents.create(paymentIntentOptions);
     console.log(`PaymentIntent créé avec ID: ${paymentIntent.id}`);
 
     // Renvoyer les informations nécessaires au client

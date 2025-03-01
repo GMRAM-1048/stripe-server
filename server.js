@@ -123,7 +123,7 @@ app.post('/create-payment-intent', async (req, res) => {
     console.log('Requête reçue:', req.body);
     
     // Extraire les données de la requête
-    const { amount, email = 'client@example.com', payment_method = null } = req.body;
+    const { amount, email = 'client@example.com', payment_method = null, customerId = null } = req.body;
     
     if (!amount || amount <= 0) {
       return res.status(400).json({ error: 'Montant invalide. Veuillez fournir un montant positif.' });

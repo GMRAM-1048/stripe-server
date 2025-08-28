@@ -117,6 +117,122 @@ app.post('/create-setup-intent', async (req, res) => {
   }
 });
 
+// 4. Endpoint pour effectuer un remboursement
+app.post('/refund-payment', async (req, res) => {
+  try {
+    console.log('Demande de remboursement reçue:', req.body);
+    
+    const { 
+      paymentIntentId, 
+      amount = null, // Si null, remboursement complet
+      reason = 'requested_by_customer',
+      reservationId = null // Pour le logging/audit
+    } = req.body;
+    
+    if (!paymentIntentId) {
+      return res.status(400).json({ error: 'Payment Intent ID requis' });
+    }
+    
+    // Vérifier d'abord que le PaymentIntent existe
+    let paymentIntent;
+    try {
+      paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+      console.log(`PaymentIntent trouvé: ${paymentIntent.id}, montant: ${paymentIntent.amount}, statut: ${paymentIntent.status}`);
+    } catch (error) {
+      console.error('PaymentIntent non trouvé:', error);
+      return res.status(404).json({ error: 'Payment Intent non trouvé ou invalide' });
+    }
+    
+    // Vérifier que le paiement a été effectué avec succès
+    if (paymentIntent.status !== 'succeeded') {
+      return res.status(400).json({ 
+        error: `Impossible de rembourser: statut du paiement = ${paymentIntent.status}` 
+      });
+    }
+    
+    // Vérifier qu'il n'y a pas déjà eu un remboursement complet
+    if (paymentIntent.amount_received === 0) {
+      return res.status(400).json({ error: 'Ce paiement a déjà été entièrement remboursé' });
+    }
+    
+    // Options du remboursement
+    const refundOptions = {
+      payment_intent: paymentIntentId,
+      reason: reason
+    };
+    
+    // Si un montant spécifique est demandé, l'ajouter
+    if (amount && amount > 0) {
+      refundOptions.amount = amount;
+      console.log(`Remboursement partiel demandé: ${amount} centimes`);
+    } else {
+      console.log('Remboursement complet demandé');
+    }
+    
+    // Effectuer le remboursement
+    const refund = await stripe.refunds.create(refundOptions);
+    
+    console.log(`Remboursement créé: ${refund.id}, montant: ${refund.amount}, statut: ${refund.status}`);
+    
+    // Log pour audit si reservationId fourni
+    if (reservationId) {
+      console.log(`Remboursement pour réservation ${reservationId}: ${refund.id}`);
+    }
+    
+    res.json({
+      success: true,
+      refund: {
+        id: refund.id,
+        amount: refund.amount,
+        currency: refund.currency,
+        status: refund.status,
+        reason: refund.reason,
+        created: refund.created
+      },
+      message: 'Remboursement effectué avec succès'
+    });
+    
+  } catch (error) {
+    console.error('Erreur lors du remboursement:', error);
+    
+    // Gestion d'erreurs spécifiques Stripe
+    if (error.type === 'StripeCardError') {
+      res.status(400).json({ error: `Erreur carte: ${error.message}` });
+    } else if (error.type === 'StripeInvalidRequestError') {
+      res.status(400).json({ error: `Requête invalide: ${error.message}` });
+    } else {
+      res.status(500).json({ error: `Erreur serveur: ${error.message}` });
+    }
+  }
+});
+
+// 5. Endpoint pour vérifier le statut d'un remboursement
+app.get('/refund-status/:refundId', async (req, res) => {
+  try {
+    const { refundId } = req.params;
+    
+    if (!refundId) {
+      return res.status(400).json({ error: 'Refund ID requis' });
+    }
+    
+    const refund = await stripe.refunds.retrieve(refundId);
+    
+    res.json({
+      id: refund.id,
+      amount: refund.amount,
+      currency: refund.currency,
+      status: refund.status,
+      reason: refund.reason,
+      created: refund.created,
+      paymentIntent: refund.payment_intent
+    });
+    
+  } catch (error) {
+    console.error('Erreur:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Route principale pour créer un PaymentIntent
 app.post('/create-payment-intent', async (req, res) => {
   try {

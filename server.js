@@ -331,6 +331,192 @@ app.post('/create-payment-intent', async (req, res) => {
   }
 });
 
+// Nouveaux endpoints Stripe Connect à ajouter dans server.js
+
+// Endpoint pour créer un compte Stripe Connect
+app.post('/create-connected-account', async (req, res) => {
+  try {
+    const { userId, country, email } = req.body;
+    
+    if (!userId || !country) {
+      return res.status(400).json({ error: 'userId et country requis' });
+    }
+
+    console.log(`Création d'un compte Connect pour user ${userId}, pays: ${country}`);
+
+    // Créer le compte Express Connect
+    const account = await stripe.accounts.create({
+      type: 'express',
+      country: country,
+      email: email,
+      capabilities: {
+        card_payments: { requested: true },
+        transfers: { requested: true },
+      },
+      business_type: 'individual', // Pour les livreurs individuels
+    });
+
+    console.log(`Compte Connect créé: ${account.id}`);
+
+    res.json({
+      accountId: account.id,
+      success: true
+    });
+
+  } catch (error) {
+    console.error('Erreur création compte Connect:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint pour créer le lien d'onboarding
+app.post('/create-onboarding-link', async (req, res) => {
+  try {
+    const { accountId, userId } = req.body;
+    
+    if (!accountId) {
+      return res.status(400).json({ error: 'accountId requis' });
+    }
+
+    console.log(`Création lien onboarding pour compte ${accountId}`);
+
+    const accountLink = await stripe.accountLinks.create({
+      account: accountId,
+      refresh_url: `${process.env.BASE_URL || 'https://votre-app.com'}/reauth?account_id=${accountId}`,
+      return_url: `${process.env.BASE_URL || 'https://votre-app.com'}/success?account_id=${accountId}`,
+      type: 'account_onboarding',
+    });
+
+    console.log(`Lien d'onboarding créé: ${accountLink.url}`);
+
+    res.json({
+      url: accountLink.url,
+      success: true
+    });
+
+  } catch (error) {
+    console.error('Erreur création lien onboarding:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint pour vérifier le statut d'un compte Connect
+app.get('/account-status/:accountId', async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    
+    if (!accountId) {
+      return res.status(400).json({ error: 'accountId requis' });
+    }
+
+    const account = await stripe.accounts.retrieve(accountId);
+    
+    res.json({
+      accountId: account.id,
+      detailsSubmitted: account.details_submitted,
+      payoutsEnabled: account.payouts_enabled,
+      chargesEnabled: account.charges_enabled,
+      requirements: account.requirements,
+      success: true
+    });
+
+  } catch (error) {
+    console.error('Erreur vérification statut compte:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint pour effectuer un paiement vers un compte Connect
+app.post('/create-payout', async (req, res) => {
+  try {
+    const { accountId, amount, currency = 'cad', description } = req.body;
+    
+    if (!accountId || !amount) {
+      return res.status(400).json({ error: 'accountId et amount requis' });
+    }
+
+    console.log(`Création payout: ${amount} ${currency} vers ${accountId}`);
+
+    // Créer un transfer vers le compte Connect
+    const transfer = await stripe.transfers.create({
+      amount: amount, // Montant en centimes
+      currency: currency,
+      destination: accountId,
+      description: description || 'Paiement livraison'
+    });
+
+    console.log(`Transfer créé: ${transfer.id}`);
+
+    res.json({
+      transferId: transfer.id,
+      amount: transfer.amount,
+      currency: transfer.currency,
+      status: transfer.status,
+      success: true
+    });
+
+  } catch (error) {
+    console.error('Erreur création payout:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint pour gérer les webhooks Stripe
+app.post('/webhook', express.raw({type: 'application/json'}), (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.log(`Webhook signature verification failed.`, err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  console.log('Webhook reçu:', event.type);
+
+  // Gérer les événements Connect
+  switch (event.type) {
+    case 'account.updated':
+      const account = event.data.object;
+      console.log(`Compte ${account.id} mis à jour:`, {
+        detailsSubmitted: account.details_submitted,
+        payoutsEnabled: account.payouts_enabled,
+        requirements: account.requirements
+      });
+      
+      // Ici, vous pourriez mettre à jour Firebase avec les nouvelles infos
+      // updateFirebaseAccountStatus(account.id, account);
+      break;
+
+    case 'payout.paid':
+      const payout = event.data.object;
+      console.log(`Payout ${payout.id} payé avec succès`);
+      break;
+
+    case 'payout.failed':
+      const failedPayout = event.data.object;
+      console.log(`Payout ${failedPayout.id} échoué:`, failedPayout.failure_message);
+      break;
+
+    default:
+      console.log(`Événement non géré: ${event.type}`);
+  }
+
+  res.json({received: true});
+});
+
+// Fonction helper pour mettre à jour Firebase (à implémenter selon vos besoins)
+/*
+async function updateFirebaseAccountStatus(accountId, stripeAccount) {
+  // Logique pour mettre à jour Firebase avec les nouvelles informations du compte
+  // Exemple:
+  // - Trouver l'utilisateur avec ce stripeAccountId
+  // - Mettre à jour son statut d'onboarding
+  // - Notifier l'utilisateur si nécessaire
+}
+*/
+
 // Démarrer le serveur
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {

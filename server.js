@@ -233,6 +233,169 @@ app.get('/refund-status/:refundId', async (req, res) => {
   }
 });
 
+// ============================================
+// ENDPOINTS POUR HEALTH CHECK ET VÉRIFICATION
+// ============================================
+
+// 1. Health check - Vérifie que le serveur Stripe est opérationnel
+app.get('/stripe-health', async (req, res) => {
+  try {
+    // Faire une requête légère à l'API Stripe pour vérifier la connexion
+    await stripe.balance.retrieve();
+    
+    res.json({ 
+      success: true, 
+      message: 'Serveur Stripe opérationnel',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Health check échoué:', error);
+    res.status(503).json({ 
+      success: false, 
+      message: 'Service Stripe indisponible',
+      error: error.message 
+    });
+  }
+});
+
+// 2. Vérifier l'éligibilité d'un remboursement
+app.post('/verify-refund-eligibility', async (req, res) => {
+  try {
+    const { paymentIntentId } = req.body;
+    
+    if (!paymentIntentId) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Payment Intent ID requis' 
+      });
+    }
+
+    console.log(`🔍 Vérification éligibilité: ${paymentIntentId}`);
+
+    // Récupérer le PaymentIntent depuis Stripe
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    
+    // Vérifier le statut
+    if (paymentIntent.status !== 'succeeded') {
+      return res.json({
+        success: true,
+        eligible: false,
+        message: `Paiement non éligible (statut: ${paymentIntent.status})`,
+        paymentIntentStatus: paymentIntent.status
+      });
+    }
+
+    // Calculer le montant déjà remboursé
+    const alreadyRefunded = paymentIntent.amount - paymentIntent.amount_capturable;
+    
+    // Calculer le montant maximum remboursable
+    const maxRefundable = paymentIntent.amount_capturable || 0;
+
+    // Si déjà entièrement remboursé
+    if (maxRefundable === 0) {
+      return res.json({
+        success: true,
+        eligible: false,
+        maxRefundable: 0,
+        alreadyRefunded: paymentIntent.amount,
+        message: 'Déjà entièrement remboursé',
+        paymentIntentStatus: paymentIntent.status
+      });
+    }
+
+    // Éligible pour remboursement
+    res.json({
+      success: true,
+      eligible: true,
+      maxRefundable: maxRefundable,
+      alreadyRefunded: alreadyRefunded,
+      totalAmount: paymentIntent.amount,
+      currency: paymentIntent.currency,
+      paymentIntentStatus: paymentIntent.status,
+      message: 'Éligible pour remboursement'
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur vérification éligibilité:', error);
+    
+    if (error.code === 'resource_missing') {
+      return res.status(404).json({
+        success: false,
+        eligible: false,
+        message: 'Payment Intent non trouvé'
+      });
+    }
+    
+    res.status(500).json({
+      success: false,
+      eligible: false,
+      message: error.message || 'Erreur lors de la vérification'
+    });
+  }
+});
+
+// 3. Vérifier si un refund existe déjà pour un PaymentIntent
+app.post('/check-refund-status', async (req, res) => {
+  try {
+    const { paymentIntentId } = req.body;
+    
+    if (!paymentIntentId) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Payment Intent ID requis' 
+      });
+    }
+
+    console.log(`🔍 Vérification statut refund: ${paymentIntentId}`);
+
+    // Lister tous les refunds pour ce PaymentIntent
+    const refunds = await stripe.refunds.list({
+      payment_intent: paymentIntentId,
+      limit: 10
+    });
+
+    if (refunds.data.length === 0) {
+      return res.json({
+        success: true,
+        exists: false,
+        message: 'Aucun refund trouvé'
+      });
+    }
+
+    // Retourner le refund le plus récent (ou tous)
+    const latestRefund = refunds.data[0];
+    
+    res.json({
+      success: true,
+      exists: true,
+      refundId: latestRefund.id,
+      amount: latestRefund.amount,
+      status: latestRefund.status,
+      reason: latestRefund.reason,
+      created: latestRefund.created,
+      allRefunds: refunds.data.map(r => ({
+        id: r.id,
+        amount: r.amount,
+        status: r.status,
+        created: r.created
+      }))
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur vérification statut refund:', error);
+    
+    res.status(500).json({
+      success: false,
+      exists: false,
+      message: error.message || 'Erreur lors de la vérification du statut'
+    });
+  }
+});
+
+// ============================================
+// FIN DES ENDPOINTS
+// ============================================
+
 // Route principale pour créer un PaymentIntent
 app.post('/create-payment-intent', async (req, res) => {
   try {

@@ -272,8 +272,10 @@ app.post('/verify-refund-eligibility', async (req, res) => {
 
     console.log(`🔍 Vérification éligibilité: ${paymentIntentId}`);
 
-    // Récupérer le PaymentIntent depuis Stripe
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    // Récupérer le PaymentIntent depuis Stripe avec les charges
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, {
+      expand: ['charges']
+    });
     
     // Vérifier le statut
     if (paymentIntent.status !== 'succeeded') {
@@ -285,19 +287,36 @@ app.post('/verify-refund-eligibility', async (req, res) => {
       });
     }
 
-    // Calculer le montant déjà remboursé
-    const alreadyRefunded = paymentIntent.amount - paymentIntent.amount_capturable;
-    
+    // CORRECTION: Calculer via les charges
+    let totalRefunded = 0;
+    let amountCaptured = 0;
+
+    if (paymentIntent.charges && paymentIntent.charges.data.length > 0) {
+      const charge = paymentIntent.charges.data[0];
+      amountCaptured = charge.amount;
+      totalRefunded = charge.amount_refunded || 0;
+    } else {
+      // Fallback si pas de charges
+      amountCaptured = paymentIntent.amount;
+    }
+
     // Calculer le montant maximum remboursable
-    const maxRefundable = paymentIntent.amount_capturable || 0;
+    const maxRefundable = amountCaptured - totalRefunded;
+
+    console.log(`📊 PaymentIntent ${paymentIntentId}:`, {
+      status: paymentIntent.status,
+      amountCaptured,
+      totalRefunded,
+      maxRefundable
+    });
 
     // Si déjà entièrement remboursé
-    if (maxRefundable === 0) {
+    if (maxRefundable <= 0) {
       return res.json({
         success: true,
         eligible: false,
         maxRefundable: 0,
-        alreadyRefunded: paymentIntent.amount,
+        alreadyRefunded: totalRefunded,
         message: 'Déjà entièrement remboursé',
         paymentIntentStatus: paymentIntent.status
       });
@@ -308,7 +327,7 @@ app.post('/verify-refund-eligibility', async (req, res) => {
       success: true,
       eligible: true,
       maxRefundable: maxRefundable,
-      alreadyRefunded: alreadyRefunded,
+      alreadyRefunded: totalRefunded,
       totalAmount: paymentIntent.amount,
       currency: paymentIntent.currency,
       paymentIntentStatus: paymentIntent.status,
